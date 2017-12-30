@@ -30,6 +30,7 @@
         , dictionary_name/1
         , get_bazinga/1
         , candidates/2
+        , dump_dict_to_bin/1
         ]).
 
 %% gen_server callbacks
@@ -80,6 +81,15 @@ dictionary_name(Lang) ->
          , (atom_to_binary(Lang, utf8))/binary>>,
   binary_to_atom(Bin, utf8).
 
+%% @doc saves dictionary to its binary format for a given language() which
+%%      will result in faster loading time
+-spec dump_dict_to_bin(language()) -> atom().
+dump_dict_to_bin(Lang) ->
+  BinLangSource = dictionary_path(binary, Lang),
+  EtsName = dictionary_name(Lang),
+  ets:tab2file(EtsName, BinLangSource),
+  ok.
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -127,18 +137,19 @@ code_change(_OldVsn, State, _Extra) ->
 
 -spec learn_language(language()) -> ok.
 learn_language(Lang) ->
-  LangSource = [ code:priv_dir(sheldon)
-               , "/lang/"
-               , atom_to_list(Lang)
-               , "/dictionary.txt"
-               ],
+  LangSource = dictionary_path(text, Lang),
+  BinLangSource = dictionary_path(binary, Lang),
   DictionaryName = dictionary_name(Lang),
-  Words = fill_ets(DictionaryName, LangSource),
-
-  % save the keys in set format in order to suggest words
-  KeysSet = mapsets:from_list(Words),
-  ets:insert(DictionaryName, {keys, KeysSet}),
-  ok.
+  case fill_ets(DictionaryName, LangSource, BinLangSource) of
+    {text_dict, Words} ->
+      %% save the keys in set format in order to suggest words
+      KeysSet = mapsets:from_list(Words),
+      ets:insert(DictionaryName, {keys, KeysSet}),
+      ok;
+    bin_dict ->
+      %% binary format already has keys loaded
+      ok
+  end.
 
 -spec set_bazingas(language()) -> ok.
 set_bazingas(Lang) ->
@@ -148,7 +159,7 @@ set_bazingas(Lang) ->
                   , "/bazinga.txt"
                   ],
   BazingaName = bazinga_name(Lang),
-  _Bazingas = fill_ets(BazingaName, BazingaSource),
+  _Bazingas = fill_ets(BazingaName, BazingaSource, []),
   ok.
 
 -spec bazinga_name(language()) -> atom().
@@ -158,18 +169,40 @@ bazinga_name(Lang) ->
          , (atom_to_binary(Lang, utf8))/binary>>,
   binary_to_atom(Bin, utf8).
 
--spec fill_ets(atom(), term()) -> [binary()].
-fill_ets(EtsName, Source) ->
-  {ok, SourceBin} = file:read_file(Source),
-  Words = re:split(SourceBin, "\n"), % one word per line
-  ok = create_ets(EtsName),
-  ets:insert(EtsName, [{Word} || Word <- Words]),
-  Words.
+-spec fill_ets(atom(), term(), term()) -> bin_dict | {text_dict, [binary()]}.
+fill_ets(EtsName, Source, BinSource) ->
+  case filelib:is_regular(BinSource) of
+    true ->
+      ets:file2tab(BinSource, [{verify, true}]),
+      bin_dict;
+
+    false ->
+      {ok, SourceBin} = file:read_file(Source),
+      Words = re:split(SourceBin, "\n"), % one word per line
+      ok = create_ets(EtsName),
+      ets:insert(EtsName, [{Word} || Word <- Words]),
+      {text_dict, Words}
+  end.
 
 -spec create_ets(atom()) -> ok.
 create_ets(EtsName) ->
   EtsName = ets:new(EtsName, [named_table, duplicate_bag, {read_concurrency, true}]),
   ok.
+
+-spec dictionary_path(text | binary, language()) -> iolist().
+dictionary_path(text, Lang) ->
+  do_dictionary_path("txt", Lang);
+dictionary_path(binary, Lang) ->
+  do_dictionary_path("bin", Lang).
+
+-spec do_dictionary_path(string(), atom()) -> iolist().
+do_dictionary_path(Ext, Lang) ->
+  [ code:priv_dir(sheldon)
+  , "/lang/"
+  , atom_to_list(Lang)
+  , "/dictionary."
+  , Ext
+  ].
 
 %%%===================================================================
 %%% Corrector Internal Funcions
